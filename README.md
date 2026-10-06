@@ -83,7 +83,6 @@ Deploys all stacks in order: VPC → IAM → S3 → RDS (~15 min Multi-AZ) → C
 `prod-alb` — Active, internet-facing, both instances healthy on port 8000.
 
 ![ALB](screenshots/alb-1.png)
-![ALB](screenshots/alb-2.png)
 
 ---
 
@@ -92,7 +91,6 @@ Deploys all stacks in order: VPC → IAM → S3 → RDS (~15 min Multi-AZ) → C
 `prod-mysql-db` — MySQL 8.0.46, db.t3.medium, Multi-AZ, encrypted, deletion protection enabled.
 
 ![RDS](screenshots/rds-1.png)
-![RDS](screenshots/rds-2.png)
 
 ---
 
@@ -101,7 +99,6 @@ Deploys all stacks in order: VPC → IAM → S3 → RDS (~15 min Multi-AZ) → C
 3 prod S3 buckets: static assets, CloudTrail audit, ALB logs — all encrypted, public access blocked.
 
 ![S3](screenshots/s3-1.png)
-![S3](screenshots/s3-2.png)
 
 ---
 
@@ -110,7 +107,6 @@ Deploys all stacks in order: VPC → IAM → S3 → RDS (~15 min Multi-AZ) → C
 `prod-web-acl` — 7 rules: OWASP, SQLi, Bad Inputs, Rate Limit, Anonymous IP, HTTP Flood, IP Reputation.
 
 ![WAF](screenshots/waf-1.png)
-![WAF](screenshots/waf-2.png)
 
 ---
 
@@ -119,7 +115,6 @@ Deploys all stacks in order: VPC → IAM → S3 → RDS (~15 min Multi-AZ) → C
 `prod-app-dashboard` — ALB requests, response time p99, ASG count, EC2 CPU, 4xx/5xx, WAF blocks.
 
 ![CloudWatch Dashboard](screenshots/cw-dashboard-1.png)
-![CloudWatch Dashboard](screenshots/cw-dashboard-2.png)
 
 ---
 
@@ -128,7 +123,6 @@ Deploys all stacks in order: VPC → IAM → S3 → RDS (~15 min Multi-AZ) → C
 14 alarms — EC2, ALB, ASG, WAF, RDS all monitored with SNS notifications.
 
 ![CloudWatch Alarms](screenshots/cw-alarms-1.png)
-![CloudWatch Alarms](screenshots/cw-alarms-2.png)
 
 ---
 
@@ -137,7 +131,6 @@ Deploys all stacks in order: VPC → IAM → S3 → RDS (~15 min Multi-AZ) → C
 `prod-trail` — Active, multi-region, log file validation enabled, delivering to S3 and CloudWatch Logs.
 
 ![CloudTrail](screenshots/cloudtrail-1.png)
-![CloudTrail](screenshots/cloudtrail-2.png)
 
 ---
 
@@ -146,7 +139,6 @@ Deploys all stacks in order: VPC → IAM → S3 → RDS (~15 min Multi-AZ) → C
 `prod-rds-backup-plan` — Daily and weekly backup rules targeting `prod-rds-backup-vault`.
 
 ![AWS Backup](screenshots/backup-1.png)
-![AWS Backup](screenshots/backup-2.png)
 
 ---
 
