@@ -74,11 +74,37 @@ bash scripts/deploy.sh prod
 
 Deploys all stacks in order: VPC → IAM → S3 → RDS (~15 min Multi-AZ) → Compute
 
+### 1. Infrastructure as Code — CloudFormation Stacks
+
+All 6 nested stacks deployed successfully via a single master CloudFormation template.
+
+![CloudFormation Stacks](screenshots/01-cloudformation-stacks.png)
+
 ---
 
-## Evidence
+### 2. Compute — EC2 Auto Scaling Group
 
-### 1. Load Balancing — Application Load Balancer
+2 instances running across us-east-1a and us-east-1b. Both healthy. Scaling limits: min 2, max 6.
+
+![ASG](screenshots/03-asg-instances.png)
+
+---
+
+### 3. Networking — VPC Resource Map
+
+VPC `prod-vpc` — 4 subnets (2 public, 2 private) across 2 AZs, Internet Gateway, NAT Gateway.
+
+![VPC](screenshots/05-vpc-resource-map.png)
+
+---
+
+### 4. Application — Live Response
+
+Flask app running behind ALB. `/` endpoint and `/db-check` confirming RDS connectivity.
+
+![App Response](screenshots/app-db-check.png)
+
+---
 
 `prod-alb` — Active, internet-facing, both instances healthy on port 8000.
 
