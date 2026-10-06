@@ -1,0 +1,220 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  S3 Stack - Static assets bucket (versioning, server-side encryption, lifecycle rules,
+  public-access block), CloudTrail audit bucket, and ALB access-log bucket.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+
+  ProjectName:
+    Type: String
+    Default: scalable-web-app
+
+Resources:
+
+  # ── Static Assets Bucket ───────────────────────────────────────────────────
+  StaticAssetsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      # No BucketName — CloudFormation generates a unique name automatically.
+      # Avoids "already exists" conflicts on re-deploy.
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET]
+            AllowedOrigins: ['*']
+            MaxAge: 3600
+      LifecycleConfiguration:
+        Rules:
+          - Id: MoveOldVersionsToIA
+            Status: Enabled
+            NoncurrentVersionTransitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+            NoncurrentVersionExpirationInDays: 90
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-static-assets
+
+  StaticAssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StaticAssetsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Deny all non-HTTPS access
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt StaticAssetsBucket.Arn
+              - !Sub ${StaticAssetsBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # ── CloudTrail Audit Bucket ────────────────────────────────────────────────
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      # No BucketName — auto-generated unique name
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveOldLogs
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 90
+              - StorageClass: GLACIER
+                TransitionInDays: 365
+            ExpirationInDays: 2555   # 7-year audit retention
+
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CloudTrailBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${EnvironmentName}-trail
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceArn: !Sub arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${EnvironmentName}-trail
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt CloudTrailBucket.Arn
+              - !Sub ${CloudTrailBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # ── ALB Access Logs Bucket ─────────────────────────────────────────────────
+  ALBLogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      # No BucketName — auto-generated unique name
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+
+  ALBLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ALBLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # ELB service account needs PutObject for access logs
+          - Sid: AllowELBServiceAccount
+            Effect: Allow
+            Principal:
+              AWS: arn:aws:iam::127311923021:root   # us-east-1 ELB service account
+            Action: s3:PutObject
+            Resource: !Sub ${ALBLogsBucket.Arn}/alb-logs/AWSLogs/${AWS::AccountId}/*
+          - Sid: AllowAWSLogDelivery
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${ALBLogsBucket.Arn}/alb-logs/AWSLogs/${AWS::AccountId}/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+          - Sid: AllowAWSLogDeliveryAcl
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt ALBLogsBucket.Arn
+
+  # ── SSM Parameter for static bucket ──────────────────────────────────────
+  SSMStaticBucket:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${EnvironmentName}/s3/static_bucket
+      Type: String
+      Value: !Ref StaticAssetsBucket
+      Description: Static assets S3 bucket name
+
+Outputs:
+  StaticAssetsBucketName:
+    Value: !Ref StaticAssetsBucket
+    Export:
+      Name: !Sub ${EnvironmentName}-StaticAssetsBucket
+
+  StaticAssetsBucketArn:
+    Value: !GetAtt StaticAssetsBucket.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-StaticAssetsBucketArn
+
+  CloudTrailBucketName:
+    Value: !Ref CloudTrailBucket
+    Export:
+      Name: !Sub ${EnvironmentName}-CloudTrailBucket
+
+  ALBLogsBucketName:
+    Value: !Ref ALBLogsBucket
+    Export:
+      Name: !Sub ${EnvironmentName}-ALBLogsBucket

@@ -1,0 +1,214 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Master / Root Stack - Orchestrates all nested stacks in dependency order.
+  Deploy this single template to provision the entire application infrastructure.
+
+  Stack order:
+    1. VPC  (networking foundation)
+    2. IAM  (roles & policies)
+    3. S3   (buckets — needed by CloudTrail in Compute stack)
+    4. RDS  (database — depends on VPC & IAM)
+    5. Compute (ALB, ASG, WAF, CloudWatch — depends on all above)
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name used as prefix for all resources.
+
+  ProjectName:
+    Type: String
+    Default: scalable-web-app
+    Description: Project name tag applied to all resources for cost tracking.
+
+  TemplatesBucketURL:
+    Type: String
+    Description: >
+      S3 URL prefix where nested CFT files are stored.
+      Example: https://s3.amazonaws.com/my-cfn-templates-bucket/scalable-app
+
+  # ── VPC Parameters ─────────────────────────────────────────────────────────
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+
+  PublicSubnet1CIDR:
+    Type: String
+    Default: 10.0.1.0/24
+
+  PublicSubnet2CIDR:
+    Type: String
+    Default: 10.0.2.0/24
+
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: 10.0.3.0/24
+
+  PrivateSubnet2CIDR:
+    Type: String
+    Default: 10.0.4.0/24
+
+  # ── RDS Parameters ─────────────────────────────────────────────────────────
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.medium
+
+  DBName:
+    Type: String
+    Default: appdb
+
+  DBMasterUsername:
+    Type: String
+    Default: dbadmin
+
+  DBMasterPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+
+  MultiAZ:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+
+  BackupRetentionDays:
+    Type: Number
+    Default: 7
+
+  # ── Compute Parameters ─────────────────────────────────────────────────────
+  InstanceType:
+    Type: String
+    Default: t3.small
+
+  MinInstances:
+    Type: Number
+    Default: 2
+
+  MaxInstances:
+    Type: Number
+    Default: 6
+
+  DesiredInstances:
+    Type: Number
+    Default: 2
+
+  AlertEmail:
+    Type: String
+    Default: ops-team@example.com
+
+  KeyPairName:
+    Type: String
+    Default: ''
+
+Resources:
+
+  # ── 1. VPC Stack ───────────────────────────────────────────────────────────
+  VPCStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub ${TemplatesBucketURL}/01-vpc.yaml
+      TimeoutInMinutes: 15
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        ProjectName: !Ref ProjectName
+        VpcCIDR: !Ref VpcCIDR
+        PublicSubnet1CIDR: !Ref PublicSubnet1CIDR
+        PublicSubnet2CIDR: !Ref PublicSubnet2CIDR
+        PrivateSubnet1CIDR: !Ref PrivateSubnet1CIDR
+        PrivateSubnet2CIDR: !Ref PrivateSubnet2CIDR
+      Tags:
+        - Key: StackLayer
+          Value: networking
+
+  # ── 2. IAM Stack ──────────────────────────────────────────────────────────
+  IAMStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub ${TemplatesBucketURL}/02-iam.yaml
+      TimeoutInMinutes: 10
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        ProjectName: !Ref ProjectName
+      Tags:
+        - Key: StackLayer
+          Value: security
+
+  # ── 3. S3 Stack ───────────────────────────────────────────────────────────
+  S3Stack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: IAMStack
+    Properties:
+      TemplateURL: !Sub ${TemplatesBucketURL}/04-s3.yaml
+      TimeoutInMinutes: 10
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        ProjectName: !Ref ProjectName
+      Tags:
+        - Key: StackLayer
+          Value: storage
+
+  # ── 4. RDS Stack ──────────────────────────────────────────────────────────
+  RDSStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - VPCStack
+      - IAMStack
+    Properties:
+      TemplateURL: !Sub ${TemplatesBucketURL}/03-rds.yaml
+      TimeoutInMinutes: 30
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        ProjectName: !Ref ProjectName
+        DBInstanceClass: !Ref DBInstanceClass
+        DBName: !Ref DBName
+        DBMasterUsername: !Ref DBMasterUsername
+        DBMasterPassword: !Ref DBMasterPassword
+        MultiAZ: !Ref MultiAZ
+        BackupRetentionDays: !Ref BackupRetentionDays
+      Tags:
+        - Key: StackLayer
+          Value: database
+
+  # ── 5. Compute Stack ──────────────────────────────────────────────────────
+  ComputeStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - VPCStack
+      - IAMStack
+      - S3Stack
+      - RDSStack
+    Properties:
+      TemplateURL: !Sub ${TemplatesBucketURL}/05-compute.yaml
+      TimeoutInMinutes: 40
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        ProjectName: !Ref ProjectName
+        InstanceType: !Ref InstanceType
+        MinInstances: !Ref MinInstances
+        MaxInstances: !Ref MaxInstances
+        DesiredInstances: !Ref DesiredInstances
+        AlertEmail: !Ref AlertEmail
+        KeyPairName: !Ref KeyPairName
+      Tags:
+        - Key: StackLayer
+          Value: compute
+
+Outputs:
+  ApplicationURL:
+    Description: Application entry point (ALB DNS name)
+    Value: !Sub
+      - http://${ALBDns}
+      - ALBDns: !GetAtt ComputeStack.Outputs.ALBDNSName
+
+  VpcId:
+    Value: !GetAtt VPCStack.Outputs.VpcId
+
+  RDSEndpoint:
+    Value: !GetAtt RDSStack.Outputs.RDSEndpointAddress
+
+  ASGName:
+    Value: !GetAtt ComputeStack.Outputs.ASGName
+
+  WAFWebACLArn:
+    Value: !GetAtt ComputeStack.Outputs.WAFWebACLArn

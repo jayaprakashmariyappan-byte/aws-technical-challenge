@@ -1,0 +1,27 @@
+# Secrets and credentials
+*.pem
+.env
+*.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary / throwaway scripts
+read_pdf.py
+
+# Original diagram file with UUID name
+2942ce87-35c1-44a4-ba62-42deacbf7ec7.drawio.png
+
+# Task brief PDF
+AWS Technical Challenge.pdf

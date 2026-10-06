@@ -1,0 +1,322 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  RDS Stack - Multi-AZ MySQL 8.0 instance in private subnets, DB subnet group,
+  parameter group, automated backups (7-day retention), enhanced monitoring,
+  deletion protection, storage encryption, and AWS Backup plan (daily + weekly).
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+
+  ProjectName:
+    Type: String
+    Default: scalable-web-app
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.medium
+    AllowedValues:
+      - db.t3.micro
+      - db.t3.small
+      - db.t3.medium
+      - db.r6g.large
+      - db.r6g.xlarge
+
+  DBName:
+    Type: String
+    Default: appdb
+    MinLength: 1
+    MaxLength: 64
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9_]*'
+
+  DBMasterUsername:
+    Type: String
+    Default: dbadmin
+    MinLength: 1
+    MaxLength: 16
+    NoEcho: false
+
+  DBMasterPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+    Description: >
+      Master password for RDS. Stored in SSM SecureString after deploy —
+      never hard-code in production.
+
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 16384
+
+  MultiAZ:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+
+  BackupRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+
+Resources:
+
+  # ── DB Subnet Group ────────────────────────────────────────────────────────
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub ${EnvironmentName} private subnet group for RDS
+      DBSubnetGroupName: !Sub ${EnvironmentName}-db-subnet-group
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PrivateSubnet1
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-db-subnet-group
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ── DB Parameter Group ─────────────────────────────────────────────────────
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Family: mysql8.0
+      Description: !Sub ${EnvironmentName} MySQL 8.0 parameter group
+      Parameters:
+        slow_query_log: '1'
+        long_query_time: '2'
+        log_output: FILE
+        max_connections: '500'
+        innodb_buffer_pool_size: '{DBInstanceClassMemory*3/4}'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-db-param-group
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ── RDS Instance ───────────────────────────────────────────────────────────
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot        # Takes a final snapshot before deletion
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub ${EnvironmentName}-mysql-db
+      DBName: !Ref DBName
+      DBInstanceClass: !Ref DBInstanceClass
+      Engine: mysql
+      EngineVersion: '8.0.46'
+      MasterUsername: !Ref DBMasterUsername
+      MasterUserPassword: !Ref DBMasterPassword
+      AllocatedStorage: !Ref DBAllocatedStorage
+      MaxAllocatedStorage: 100        # Storage autoscaling up to 100 GB
+      StorageType: gp3
+      StorageEncrypted: true          # Encryption at rest
+      MultiAZ: !Ref MultiAZ
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      VPCSecurityGroups:
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-RDSSecurityGroup
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: true
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      MonitoringInterval: 60
+      MonitoringRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-RDSMonitoringRoleArn
+      EnableCloudwatchLogsExports:
+        - error
+        - general
+        - slowquery
+        - audit
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-mysql-db
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ── CloudWatch Alarms for RDS ──────────────────────────────────────────────
+  RDSHighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-rds-high-cpu
+      AlarmDescription: RDS CPU utilisation exceeded 80% for 5 minutes
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  RDSLowStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-rds-low-storage
+      AlarmDescription: RDS free storage dropped below 5 GB
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5368709120    # 5 GB in bytes
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+
+  RDSHighConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-rds-high-connections
+      AlarmDescription: RDS database connections exceeded 400
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 400
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  RDSReadLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-rds-read-latency
+      AlarmDescription: RDS read latency exceeded 200ms
+      Namespace: AWS/RDS
+      MetricName: ReadLatency
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 0.2
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # ── SSM Parameters for app servers ───────────────────────────────────────
+  SSMDBHost:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${EnvironmentName}/db/host
+      Type: String
+      Value: !GetAtt RDSInstance.Endpoint.Address
+      Description: RDS endpoint hostname
+
+  SSMDBName:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${EnvironmentName}/db/name
+      Type: String
+      Value: !Ref DBName
+      Description: RDS database name
+
+  SSMDBUser:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${EnvironmentName}/db/user
+      Type: String
+      Value: !Ref DBMasterUsername
+      Description: RDS master username
+
+  SSMDBPassword:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${EnvironmentName}/db/password
+      Type: String
+      Value: !Ref DBMasterPassword
+      Description: RDS master password
+
+  # ── AWS Backup Plan for RDS ────────────────────────────────────────────────
+  RDSBackupVault:
+    Type: AWS::Backup::BackupVault
+    Properties:
+      BackupVaultName: !Sub ${EnvironmentName}-rds-backup-vault
+      BackupVaultTags:
+        Name: !Sub ${EnvironmentName}-rds-backup-vault
+        Environment: !Ref EnvironmentName
+        Project: !Ref ProjectName
+
+  RDSBackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub ${EnvironmentName}-rds-backup-plan
+        BackupPlanRule:
+          - RuleName: DailyBackup
+            TargetBackupVault: !Ref RDSBackupVault
+            ScheduleExpression: cron(0 2 * * ? *)    # 02:00 UTC daily
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 180
+            Lifecycle:
+              DeleteAfterDays: 30                     # 30 days daily retention
+          - RuleName: WeeklyBackup
+            TargetBackupVault: !Ref RDSBackupVault
+            ScheduleExpression: cron(0 3 ? * SUN *)  # 03:00 UTC every Sunday
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 360
+            Lifecycle:
+              DeleteAfterDays: 90                     # 90 days weekly retention
+      BackupPlanTags:
+        Name: !Sub ${EnvironmentName}-rds-backup-plan
+        Environment: !Ref EnvironmentName
+        Project: !Ref ProjectName
+
+  RDSBackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref RDSBackupPlan
+      BackupSelection:
+        SelectionName: !Sub ${EnvironmentName}-rds-selection
+        IamRoleArn: !ImportValue
+          Fn::Sub: ${EnvironmentName}-BackupRoleArn
+        Resources:
+          - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:${EnvironmentName}-mysql-db
+
+Outputs:
+  RDSInstanceId:
+    Value: !Ref RDSInstance
+    Export:
+      Name: !Sub ${EnvironmentName}-RDSInstanceId
+
+  RDSEndpointAddress:
+    Description: RDS MySQL endpoint hostname
+    Value: !GetAtt RDSInstance.Endpoint.Address
+    Export:
+      Name: !Sub ${EnvironmentName}-RDSEndpoint
+
+  RDSEndpointPort:
+    Value: !GetAtt RDSInstance.Endpoint.Port
+    Export:
+      Name: !Sub ${EnvironmentName}-RDSPort
+
+  DBName:
+    Value: !Ref DBName
+    Export:
+      Name: !Sub ${EnvironmentName}-DBName

@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  IAM Stack - EC2 instance profile, RDS monitoring role, CloudTrail S3 delivery role,
+  and AWS Backup role. All follow least-privilege principles.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+
+  ProjectName:
+    Type: String
+    Default: scalable-web-app
+
+Resources:
+
+  # ── EC2 App Instance Role ──────────────────────────────────────────────────
+  # Allows app servers to: read S3 static assets, write CloudWatch logs/metrics,
+  # read SSM Parameter Store (DB credentials), and use AWS Backup.
+  AppInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-app-instance-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore   # SSM Session Manager (no bastion needed)
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy    # CloudWatch agent push metrics/logs
+      Policies:
+        - PolicyName: S3StaticAssetsReadOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${EnvironmentName}-static-assets
+                  - !Sub arn:aws:s3:::${EnvironmentName}-static-assets/*
+        - PolicyName: SSMParameterReadSecrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+        - PolicyName: CloudWatchLogsWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/app/${EnvironmentName}*
+
+  AppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${EnvironmentName}-app-instance-profile
+      Roles:
+        - !Ref AppInstanceRole
+
+  # ── RDS Enhanced Monitoring Role ───────────────────────────────────────────
+  RDSMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-rds-monitoring-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+
+  # ── AWS Backup Role ────────────────────────────────────────────────────────
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-backup-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores
+
+  # ── CloudTrail S3 Delivery Policy ─────────────────────────────────────────
+  # (Attached inline on the S3 bucket in 04-s3.yaml; role below is for
+  #  any CloudWatch Logs delivery CloudTrail needs.)
+  CloudTrailLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-cloudtrail-logs-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudTrailCWLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/cloudtrail/*:*
+
+  # ── ALB / WAF Logging Role ─────────────────────────────────────────────────
+  WAFLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-waf-logging-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: wafv2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WAFFirehoseDelivery
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - firehose:PutRecord
+                  - firehose:PutRecordBatch
+                Resource: '*'
+
+Outputs:
+  AppInstanceProfileArn:
+    Value: !GetAtt AppInstanceProfile.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-AppInstanceProfileArn
+
+  AppInstanceProfileName:
+    Value: !Ref AppInstanceProfile
+    Export:
+      Name: !Sub ${EnvironmentName}-AppInstanceProfileName
+
+  RDSMonitoringRoleArn:
+    Value: !GetAtt RDSMonitoringRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-RDSMonitoringRoleArn
+
+  BackupRoleArn:
+    Value: !GetAtt BackupRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-BackupRoleArn
+
+  CloudTrailLogsRoleArn:
+    Value: !GetAtt CloudTrailLogsRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-CloudTrailLogsRoleArn

@@ -1,0 +1,828 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Compute Stack - Application Load Balancer (with WAF v2), EC2 Auto Scaling Group
+  (multi-AZ, across private subnets), Launch Template, CloudWatch Alarms, 
+  CloudWatch Log Groups, CloudTrail, and SNS notification topic.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+
+  ProjectName:
+    Type: String
+    Default: scalable-web-app
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium, t3.large, m5.large, m5.xlarge]
+
+  # Latest Amazon Linux 2023 AMI via SSM — always up to date
+  LatestAL2023AMI:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+  MinInstances:
+    Type: Number
+    Default: 2
+    MinValue: 1
+
+  MaxInstances:
+    Type: Number
+    Default: 6
+    MinValue: 2
+
+  DesiredInstances:
+    Type: Number
+    Default: 2
+
+  AlertEmail:
+    Type: String
+    Default: ops-team@example.com
+    Description: Email address to receive CloudWatch alarm notifications.
+
+  KeyPairName:
+    Type: String
+    Default: ''
+    Description: Optional EC2 key pair for SSH emergency access (leave blank to disable).
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, '']]
+
+Resources:
+
+  # ── SNS Topic for Alarms ───────────────────────────────────────────────────
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${EnvironmentName}-alarm-topic
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  # ── CloudWatch Log Groups ──────────────────────────────────────────────────
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/app/${EnvironmentName}/application
+      RetentionInDays: 30
+
+  NginxAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/app/${EnvironmentName}/nginx-access
+      RetentionInDays: 14
+
+  SystemLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/app/${EnvironmentName}/system
+      RetentionInDays: 7
+
+  CloudTrailLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/cloudtrail/${EnvironmentName}
+      RetentionInDays: 90
+
+  # ── CloudTrail ─────────────────────────────────────────────────────────────
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn:
+      - AppLogGroup
+      - CloudTrailLogGroup
+    Properties:
+      TrailName: !Sub ${EnvironmentName}-trail
+      S3BucketName: !ImportValue
+        Fn::Sub: ${EnvironmentName}-CloudTrailBucket
+      IsLogging: true
+      IsMultiRegionTrail: true
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+      CloudWatchLogsLogGroupArn: !GetAtt CloudTrailLogGroup.Arn
+      CloudWatchLogsRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-CloudTrailLogsRoleArn
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+          DataResources:
+            - Type: AWS::S3::Object
+              Values:
+                - !Sub
+                  - arn:aws:s3:::${BucketName}/
+                  - BucketName: !ImportValue
+                      Fn::Sub: ${EnvironmentName}-StaticAssetsBucket
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-cloudtrail
+
+  # ── Application Load Balancer ──────────────────────────────────────────────
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${EnvironmentName}-alb
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      Subnets:
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PublicSubnet1
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PublicSubnet2
+      SecurityGroups:
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-ALBSecurityGroup
+      LoadBalancerAttributes:
+        - Key: access_logs.s3.enabled
+          Value: 'true'
+        - Key: access_logs.s3.bucket
+          Value: !ImportValue
+            Fn::Sub: ${EnvironmentName}-ALBLogsBucket
+        - Key: access_logs.s3.prefix
+          Value: alb-logs
+        - Key: deletion_protection.enabled
+          Value: 'true'
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-alb
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${EnvironmentName}-tg
+      VpcId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-VpcId
+      Protocol: HTTP
+      Port: 8000
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+        - Key: stickiness.enabled
+          Value: 'false'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-tg
+
+  ALBListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        # Redirect HTTP → HTTPS (uncomment when you have a certificate)
+        # - Type: redirect
+        #   RedirectConfig:
+        #     Protocol: HTTPS
+        #     Port: '443'
+        #     StatusCode: HTTP_301
+        # For demo purposes forward directly (no cert required)
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # Uncomment and add CertificateArn parameter for HTTPS in production
+  # ALBListenerHTTPS:
+  #   Type: AWS::ElasticLoadBalancingV2::Listener
+  #   Properties:
+  #     LoadBalancerArn: !Ref ALB
+  #     Port: 443
+  #     Protocol: HTTPS
+  #     SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+  #     Certificates:
+  #       - CertificateArn: !Ref CertificateArn
+  #     DefaultActions:
+  #       - Type: forward
+  #         TargetGroupArn: !Ref ALBTargetGroup
+
+  # ── WAF v2 ─────────────────────────────────────────────────────────────────
+  WAFWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub ${EnvironmentName}-web-acl
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${EnvironmentName}WebACL
+      Rules:
+        # AWS Managed Core Rule Set — covers OWASP Top 10
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSet
+        # AWS Managed Known Bad Inputs
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesKnownBadInputsRuleSet
+        # AWS Managed SQL Injection Protection
+        - Name: AWSManagedRulesSQLiRuleSet
+          Priority: 3
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesSQLiRuleSet
+        # Rate limiting — 2000 requests per 5 minutes per IP
+        - Name: RateLimitRule
+          Priority: 4
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RateLimitRule
+
+        # Anonymous IP list — blocks Tor exits, VPNs, proxies used in DDoS
+        - Name: AWSManagedRulesAnonymousIpList
+          Priority: 5
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAnonymousIpList
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesAnonymousIpList
+
+        # HTTP flood protection — blocks IPs sending too many requests per URI
+        - Name: HTTPFloodRateLimitPerURI
+          Priority: 6
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 500
+              AggregateKeyType: FORWARDED_IP
+              ForwardedIPConfig:
+                HeaderName: X-Forwarded-For
+                FallbackBehavior: MATCH
+              ScopeDownStatement:
+                ByteMatchStatement:
+                  FieldToMatch:
+                    UriPath: {}
+                  PositionalConstraint: STARTS_WITH
+                  SearchString: /
+                  TextTransformations:
+                    - Priority: 0
+                      Type: LOWERCASE
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: HTTPFloodRateLimitPerURI
+
+        # Amazon IP reputation list — blocks known malicious IPs
+        - Name: AWSManagedRulesAmazonIpReputationList
+          Priority: 7
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesAmazonIpReputationList
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-web-acl
+
+  WAFAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    DependsOn: ALB
+    Properties:
+      ResourceArn: !Ref ALB
+      WebACLArn: !GetAtt WAFWebACL.Arn
+
+  # ── Launch Template ────────────────────────────────────────────────────────
+  AppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${EnvironmentName}-app-lt
+      LaunchTemplateData:
+        ImageId: !Ref LatestAL2023AMI
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Name: !ImportValue
+            Fn::Sub: ${EnvironmentName}-AppInstanceProfileName
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: ${EnvironmentName}-AppSecurityGroup
+        KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref AWS::NoValue]
+        MetadataOptions:
+          HttpTokens: required          # IMDSv2 enforced
+          HttpPutResponseHopLimit: 1
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 20
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        Monitoring:
+          Enabled: true                  # Detailed CloudWatch monitoring
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub ${EnvironmentName}-app-server
+              - Key: Environment
+                Value: !Ref EnvironmentName
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -x
+            exec > >(tee /var/log/user-data.log | logger -t user-data) 2>&1
+
+            # ── System updates ────────────────────────────────────────────
+            dnf update -y
+            dnf install -y python3-pip python3-devel gcc nginx amazon-cloudwatch-agent rsyslog
+            systemctl enable rsyslog
+            systemctl start rsyslog
+
+            # ── Fetch DB credentials from SSM Parameter Store ─────────────
+            DB_HOST=$(aws ssm get-parameter \
+              --name "/${EnvironmentName}/db/host" \
+              --region ${AWS::Region} \
+              --query 'Parameter.Value' --output text)
+            DB_NAME=$(aws ssm get-parameter \
+              --name "/${EnvironmentName}/db/name" \
+              --region ${AWS::Region} \
+              --query 'Parameter.Value' --output text)
+            DB_USER=$(aws ssm get-parameter \
+              --name "/${EnvironmentName}/db/user" \
+              --region ${AWS::Region} \
+              --query 'Parameter.Value' --output text)
+            DB_PASS=$(aws ssm get-parameter \
+              --name "/${EnvironmentName}/db/password" \
+              --with-decryption \
+              --region ${AWS::Region} \
+              --query 'Parameter.Value' --output text)
+            S3_BUCKET=$(aws ssm get-parameter \
+              --name "/${EnvironmentName}/s3/static_bucket" \
+              --region ${AWS::Region} \
+              --query 'Parameter.Value' --output text)
+
+            # ── Install Flask app ─────────────────────────────────────────
+            mkdir -p /opt/app
+            pip3 install flask gunicorn pymysql boto3
+
+            cat > /opt/app/app.py << 'PYEOF'
+            import os
+            from flask import Flask, jsonify
+            import pymysql
+
+            app = Flask(__name__)
+
+            DB_CONFIG = {
+                "host": os.environ.get("DB_HOST", "localhost"),
+                "user": os.environ.get("DB_USER", "dbadmin"),
+                "password": os.environ.get("DB_PASS", ""),
+                "database": os.environ.get("DB_NAME", "appdb"),
+                "cursorclass": pymysql.cursors.DictCursor,
+            }
+
+            @app.route("/health")
+            def health():
+                return jsonify(status="ok"), 200
+
+            @app.route("/")
+            def index():
+                return jsonify(
+                    message="Scalable Web App on AWS",
+                    environment=os.environ.get("ENV", "prod")
+                ), 200
+
+            @app.route("/db-check")
+            def db_check():
+                try:
+                    conn = pymysql.connect(**DB_CONFIG)
+                    conn.close()
+                    return jsonify(db="connected"), 200
+                except Exception as e:
+                    return jsonify(db="error", detail=str(e)), 500
+
+            if __name__ == "__main__":
+                app.run(host="0.0.0.0", port=8000)
+            PYEOF
+
+            # ── Systemd service ───────────────────────────────────────────
+            cat > /etc/systemd/system/app.service << EOF
+            [Unit]
+            Description=Flask App (Gunicorn)
+            After=network.target
+
+            [Service]
+            User=ec2-user
+            WorkingDirectory=/opt/app
+            Environment="DB_HOST=$DB_HOST"
+            Environment="DB_USER=$DB_USER"
+            Environment="DB_PASS=$DB_PASS"
+            Environment="DB_NAME=$DB_NAME"
+            Environment="ENV=${EnvironmentName}"
+            ExecStart=/usr/local/bin/gunicorn --workers 4 --bind 0.0.0.0:8000 --access-logfile /var/log/app.log --error-logfile /var/log/app.log app:app
+            Restart=always
+            RestartSec=5
+
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+
+            systemctl daemon-reload
+            systemctl enable app
+            touch /var/log/app.log
+            chown ec2-user:ec2-user /var/log/app.log
+            systemctl start app
+
+            # ── Nginx reverse proxy ───────────────────────────────────────
+            cat > /etc/nginx/conf.d/app.conf << 'EOF'
+            server {
+                listen 80;
+                location / {
+                    proxy_pass http://127.0.0.1:8000;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                }
+                location /health {
+                    proxy_pass http://127.0.0.1:8000/health;
+                }
+            }
+            EOF
+
+            systemctl enable nginx
+            systemctl start nginx
+
+            # ── CloudWatch Agent config ────────────────────────────────────
+            cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << EOF
+            {
+              "agent": { "metrics_collection_interval": 60 },
+              "logs": {
+                "logs_collected": {
+                  "files": {
+                    "collect_list": [
+                      {
+                        "file_path": "/var/log/app.log",
+                        "log_group_name": "/aws/app/${EnvironmentName}/application",
+                        "log_stream_name": "{instance_id}"
+                      },
+                      {
+                        "file_path": "/var/log/messages",
+                        "log_group_name": "/aws/app/${EnvironmentName}/system",
+                        "log_stream_name": "{instance_id}"
+                      }
+                    ]
+                  }
+                }
+              },
+              "metrics": {
+                "namespace": "AppMetrics/${EnvironmentName}",
+                "metrics_collected": {
+                  "cpu": { "measurement": ["cpu_usage_active"], "metrics_collection_interval": 60 },
+                  "mem": { "measurement": ["mem_used_percent"] },
+                  "disk": { "measurement": ["disk_used_percent"], "resources": ["/"] }
+                }
+              }
+            }
+            EOF
+
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+              -a fetch-config \
+              -m ec2 \
+              -s \
+              -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+  # ── Auto Scaling Group ─────────────────────────────────────────────────────
+  AppAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: ALB
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1        # Keep at least 1 healthy during deployments
+        MaxBatchSize: 1
+        PauseTime: PT5M
+        WaitOnResourceSignals: false
+    Properties:
+      AutoScalingGroupName: !Sub ${EnvironmentName}-app-asg
+      LaunchTemplate:
+        LaunchTemplateId: !Ref AppLaunchTemplate
+        Version: !GetAtt AppLaunchTemplate.LatestVersionNumber
+      MinSize: !Ref MinInstances
+      MaxSize: !Ref MaxInstances
+      DesiredCapacity: !Ref DesiredInstances
+      # Spread across PRIVATE subnets in 2 AZs for high availability
+      VPCZoneIdentifier:
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PrivateSubnet1
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PrivateSubnet2
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 120
+      DefaultInstanceWarmup: 120
+      # Capacity Rebalancing for Spot (optional — works with on-demand too)
+      CapacityRebalance: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-app-asg
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: !Ref EnvironmentName
+          PropagateAtLaunch: true
+
+  # ── Auto Scaling Policies ──────────────────────────────────────────────────
+  # Target Tracking — keep average CPU at 60%
+  CPUTargetTrackingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AppAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      EstimatedInstanceWarmup: 120
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 60.0
+        DisableScaleIn: false
+
+  # Target Tracking — ALB request count per target
+  ALBRequestCountPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AppAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      EstimatedInstanceWarmup: 60
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Sub
+            - ${ALBSuffix}/${TGSuffix}
+            - ALBSuffix: !GetAtt ALB.LoadBalancerFullName
+              TGSuffix: !GetAtt ALBTargetGroup.TargetGroupFullName
+        TargetValue: 1000.0
+        DisableScaleIn: false
+
+  # ── CloudWatch Alarms ──────────────────────────────────────────────────────
+  HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-high-cpu
+      AlarmDescription: ASG average CPU > 80% for 5 minutes
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AppAutoScalingGroup
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      TreatMissingData: notBreaching
+
+  ALBUnhealthyHostsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-alb-unhealthy-hosts
+      AlarmDescription: One or more ALB targets are unhealthy
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt ALB.LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !GetAtt ALBTargetGroup.TargetGroupFullName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlarmTopic
+      TreatMissingData: notBreaching
+
+  ALBHighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-alb-high-latency
+      AlarmDescription: ALB target response time > 2 seconds
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt ALB.LoadBalancerFullName
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 2
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlarmTopic
+      TreatMissingData: notBreaching
+
+  ALBHighErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-alb-5xx-errors
+      AlarmDescription: ALB 5xx error count > 10 in 5 minutes
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_ELB_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt ALB.LoadBalancerFullName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlarmTopic
+      TreatMissingData: notBreaching
+
+  WAFBlockedRequestsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-waf-blocked-requests
+      AlarmDescription: WAF is blocking an unusually high number of requests
+      Namespace: AWS/WAFV2
+      MetricName: BlockedRequests
+      Dimensions:
+        - Name: WebACL
+          Value: !Ref WAFWebACL
+        - Name: Region
+          Value: !Ref AWS::Region
+        - Name: Rule
+          Value: ALL
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlarmTopic
+      TreatMissingData: notBreaching
+
+  ASGMinSizeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-asg-at-min-capacity
+      AlarmDescription: ASG is at minimum capacity — cannot scale in further
+      Namespace: AWS/AutoScaling
+      MetricName: GroupInServiceInstances
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AppAutoScalingGroup
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: !Ref MinInstances
+      ComparisonOperator: LessThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlarmTopic
+      TreatMissingData: breaching
+
+  # ── CloudWatch Dashboard ───────────────────────────────────────────────────
+  AppDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${EnvironmentName}-app-dashboard
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "title": "ALB Request Count",
+                "region": "${AWS::Region}",
+                "metrics": [["AWS/ApplicationELB","RequestCount","LoadBalancer","${ALB.LoadBalancerFullName}"]],
+                "period": 300, "stat": "Sum", "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "ALB Target Response Time (p99)",
+                "region": "${AWS::Region}",
+                "metrics": [["AWS/ApplicationELB","TargetResponseTime","LoadBalancer","${ALB.LoadBalancerFullName}"]],
+                "period": 300, "stat": "p99", "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "ASG Instance Count",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["AWS/AutoScaling","GroupInServiceInstances","AutoScalingGroupName","${AppAutoScalingGroup}"],
+                  ["AWS/AutoScaling","GroupDesiredCapacity","AutoScalingGroupName","${AppAutoScalingGroup}"]
+                ],
+                "period": 300, "stat": "Average", "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "EC2 CPU Utilisation",
+                "region": "${AWS::Region}",
+                "metrics": [["AWS/EC2","CPUUtilization","AutoScalingGroupName","${AppAutoScalingGroup}"]],
+                "period": 300, "stat": "Average", "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "ALB 4xx / 5xx Errors",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["AWS/ApplicationELB","HTTPCode_ELB_4XX_Count","LoadBalancer","${ALB.LoadBalancerFullName}"],
+                  ["AWS/ApplicationELB","HTTPCode_ELB_5XX_Count","LoadBalancer","${ALB.LoadBalancerFullName}"]
+                ],
+                "period": 300, "stat": "Sum", "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "WAF Blocked Requests",
+                "region": "${AWS::Region}",
+                "metrics": [["AWS/WAFV2","BlockedRequests","WebACL","${EnvironmentName}-web-acl","Region","${AWS::Region}","Rule","ALL"]],
+                "period": 300, "stat": "Sum", "view": "timeSeries"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  ALBDNSName:
+    Description: Public DNS of the Application Load Balancer
+    Value: !GetAtt ALB.DNSName
+    Export:
+      Name: !Sub ${EnvironmentName}-ALBDNSName
+
+  ALBArn:
+    Value: !Ref ALB
+    Export:
+      Name: !Sub ${EnvironmentName}-ALBArn
+
+  ASGName:
+    Value: !Ref AppAutoScalingGroup
+    Export:
+      Name: !Sub ${EnvironmentName}-ASGName
+
+  WAFWebACLArn:
+    Value: !GetAtt WAFWebACL.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-WAFWebACLArn
+
+  AlarmTopicArn:
+    Value: !Ref AlarmTopic
+    Export:
+      Name: !Sub ${EnvironmentName}-AlarmTopicArn
