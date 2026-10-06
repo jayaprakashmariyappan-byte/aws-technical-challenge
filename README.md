@@ -78,102 +78,75 @@ Deploys all stacks in order: VPC → IAM → S3 → RDS (~15 min Multi-AZ) → C
 
 ## Evidence
 
-### 1. Infrastructure as Code — CloudFormation Stacks
-
-All 6 nested stacks deployed successfully via a single master CloudFormation template.
-
-![CloudFormation Stacks](screenshots/image001.png)
-![CloudFormation Stacks](screenshots/image002.png)
-
----
-
-### 2. Compute — EC2 Auto Scaling Group
-
-2 instances running across us-east-1a and us-east-1b. Both healthy. Scaling limits: min 2, max 6.
-
-![ASG Instances](screenshots/image003.png)
-![ASG Instances](screenshots/image004.png)
-
----
-
-### 3. Networking — VPC Resource Map
-
-VPC `prod-vpc` — 4 subnets (2 public, 2 private) across 2 AZs, Internet Gateway, NAT Gateway, route tables.
-
-![VPC Resource Map](screenshots/image005.png)
-![VPC Resource Map](screenshots/image006.png)
-
----
-
-### 4. Load Balancing — Application Load Balancer
+### 1. Load Balancing — Application Load Balancer
 
 `prod-alb` — Active, internet-facing, both instances healthy on port 8000.
 
-![ALB](screenshots/image007.png)
-![ALB](screenshots/image008.png)
+![ALB](screenshots/alb-1.png)
+![ALB](screenshots/alb-2.png)
 
 ---
 
-### 5. Storage — RDS MySQL Multi-AZ
+### 2. Storage — RDS MySQL Multi-AZ
 
-`prod-mysql-db` — MySQL 8.0.46, db.t3.medium, Multi-AZ Yes, encrypted, deletion protection enabled.
+`prod-mysql-db` — MySQL 8.0.46, db.t3.medium, Multi-AZ, encrypted, deletion protection enabled.
 
-![RDS](screenshots/image009.png)
-![RDS](screenshots/image010.png)
+![RDS](screenshots/rds-1.png)
+![RDS](screenshots/rds-2.png)
 
 ---
 
-### 6. Storage — S3 Buckets
+### 3. Storage — S3 Buckets
 
 3 prod S3 buckets: static assets, CloudTrail audit, ALB logs — all encrypted, public access blocked.
 
-![S3 Buckets](screenshots/image011.png)
-![S3 Buckets](screenshots/image012.png)
+![S3](screenshots/s3-1.png)
+![S3](screenshots/s3-2.png)
 
 ---
 
-### 7. Security — WAF Web ACL
+### 4. Security — WAF Web ACL
 
-`prod-web-acl` — 7 rules active: OWASP, SQLi, Bad Inputs, Rate Limit, Anonymous IP, HTTP Flood, IP Reputation.
+`prod-web-acl` — 7 rules: OWASP, SQLi, Bad Inputs, Rate Limit, Anonymous IP, HTTP Flood, IP Reputation.
 
-![WAF Rules](screenshots/image013.png)
-![WAF Rules](screenshots/image014.png)
-
----
-
-### 8. Monitoring — CloudWatch Dashboard
-
-`prod-app-dashboard` — ALB requests, response time p99, ASG count, EC2 CPU, 4xx/5xx errors, WAF blocks.
-
-![CloudWatch Dashboard](screenshots/image015.png)
-![CloudWatch Dashboard](screenshots/image016.png)
+![WAF](screenshots/waf-1.png)
+![WAF](screenshots/waf-2.png)
 
 ---
 
-### 9. Monitoring — CloudWatch Alarms
+### 5. Monitoring — CloudWatch Dashboard
 
-14 alarms configured — EC2, ALB, ASG, WAF, RDS metrics all monitored with SNS notifications.
+`prod-app-dashboard` — ALB requests, response time p99, ASG count, EC2 CPU, 4xx/5xx, WAF blocks.
 
-![CloudWatch Alarms](screenshots/image017.png)
-![CloudWatch Alarms](screenshots/image018.png)
-
----
-
-### 10. Audit — CloudTrail
-
-`prod-trail` — Active, multi-region, log file validation enabled, delivering to S3 and CloudWatch Logs `/aws/cloudtrail/prod`.
-
-![CloudTrail](screenshots/image019.png)
-![CloudTrail](screenshots/image020.png)
+![CloudWatch Dashboard](screenshots/cw-dashboard-1.png)
+![CloudWatch Dashboard](screenshots/cw-dashboard-2.png)
 
 ---
 
-### 11. Backup — AWS Backup Plan
+### 6. Monitoring — CloudWatch Alarms
+
+14 alarms — EC2, ALB, ASG, WAF, RDS all monitored with SNS notifications.
+
+![CloudWatch Alarms](screenshots/cw-alarms-1.png)
+![CloudWatch Alarms](screenshots/cw-alarms-2.png)
+
+---
+
+### 7. Audit — CloudTrail
+
+`prod-trail` — Active, multi-region, log file validation enabled, delivering to S3 and CloudWatch Logs.
+
+![CloudTrail](screenshots/cloudtrail-1.png)
+![CloudTrail](screenshots/cloudtrail-2.png)
+
+---
+
+### 8. Backup — AWS Backup Plan
 
 `prod-rds-backup-plan` — Daily and weekly backup rules targeting `prod-rds-backup-vault`.
 
-![AWS Backup](screenshots/image021.png)
-![AWS Backup](screenshots/image022.png)
+![AWS Backup](screenshots/backup-1.png)
+![AWS Backup](screenshots/backup-2.png)
 
 ---
 
