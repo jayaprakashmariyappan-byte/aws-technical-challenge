@@ -82,8 +82,8 @@ Deploys all stacks in order: VPC → IAM → S3 → RDS (~15 min Multi-AZ) → C
 
 All 6 nested stacks deployed successfully via a single master CloudFormation template.
 
-![CloudFormation Stacks](screenshots/01-cloudformation-stacks.png)
-![CloudFormation Stacks](screenshots/02-cloudformation-stacks-2.png)
+![CloudFormation Stacks](screenshots/image001.png)
+![CloudFormation Stacks](screenshots/image002.png)
 
 ---
 
@@ -91,8 +91,8 @@ All 6 nested stacks deployed successfully via a single master CloudFormation tem
 
 2 instances running across us-east-1a and us-east-1b. Both healthy. Scaling limits: min 2, max 6.
 
-![ASG Instances](screenshots/03-asg-instances.png)
-![ASG Instances](screenshots/04-asg-instances-2.png)
+![ASG Instances](screenshots/image003.png)
+![ASG Instances](screenshots/image004.png)
 
 ---
 
@@ -100,8 +100,8 @@ All 6 nested stacks deployed successfully via a single master CloudFormation tem
 
 VPC `prod-vpc` — 4 subnets (2 public, 2 private) across 2 AZs, Internet Gateway, NAT Gateway, route tables.
 
-![VPC Resource Map](screenshots/05-vpc-resource-map.png)
-![VPC Resource Map](screenshots/06-vpc-resource-map-2.png)
+![VPC Resource Map](screenshots/image005.png)
+![VPC Resource Map](screenshots/image006.png)
 
 ---
 
