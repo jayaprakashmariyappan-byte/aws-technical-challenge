@@ -100,9 +100,10 @@ VPC `prod-vpc` — 4 subnets (2 public, 2 private) across 2 AZs, Internet Gatewa
 
 ### 4. Application — Live Response
 
-Flask app running behind ALB. `/` endpoint and `/db-check` confirming RDS connectivity.
+Flask app running behind ALB. `/` endpoint returning app info and `/db-check` confirming RDS connectivity.
 
-![App Response](screenshots/app-db-check.png)
+![App Response](screenshots/app-response.png)
+![DB Check](screenshots/app-db-check.png)
 
 ---
 
